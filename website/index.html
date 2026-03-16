@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CrashPipe — Teaching Rust Through Real Code</title>
+  <link rel="stylesheet" href="crashpipe_teaching_page.css" />
+</head>
+<body>
+  <div class="bg-grid"></div>
+  <div class="glow glow-1"></div>
+  <div class="glow glow-2"></div>
+  <div class="glow glow-3"></div>
+
+  <div class="page-shell">
+    <aside class="sidebar">
+      <div class="sidebar-card">
+        <div class="eyebrow">Rust walkthrough</div>
+        <h1>CrashPipe</h1>
+        <p class="sidebar-copy">
+          A scrollable teaching page built from your actual Rust project files.
+        </p>
+
+        <nav class="toc" id="toc">
+          <a href="#hero">Intro</a>
+          <a href="#entry">main.rs orchestration</a>
+          <a href="#cli">CLI and parsing</a>
+          <a href="#result">Result and ?</a>
+          <a href="#structs">Structs and module roles</a>
+          <a href="#state">Enums as pipeline state</a>
+          <a href="#flow">Worker flow</a>
+          <a href="#ownership">Ownership and Drop</a>
+          <a href="#db">Database checkpoints</a>
+          <a href="#watcher">Watcher thread</a>
+          <a href="#errors">Error layering</a>
+          <a href="#takeaways">Why this teaches Rust well</a>
+        </nav>
+
+        <div class="progress-wrap">
+          <div class="progress-label">Scroll progress</div>
+          <div class="progress-bar"><div id="progressFill"></div></div>
+        </div>
+      </div>
+    </aside>
+
+    <main class="content">
+      <section class="hero panel" id="hero">
+        <div class="hero-text">
+          <div class="eyebrow">10–15 minute script page</div>
+          <h2>
+            Rust concepts explained through a
+            <span>real crash-proof file pipeline</span>
+          </h2>
+          <p class="lede">
+            This page is built around your code instead of generic examples. The project watches an inbox, enqueues files into SQLite, processes them through compression, hashing, moving, and recording, then recovers cleanly if it crashes midway.
+          </p>
+          <div class="chip-row">
+            <span class="chip">Ownership</span>
+            <span class="chip">Enums</span>
+            <span class="chip">Result</span>
+            <span class="chip">Threads</span>
+            <span class="chip">SQLite</span>
+            <span class="chip">Recovery</span>
+          </div>
+        </div>
+        <div class="hero-code code-block">
+<pre><code>main.rs
+  └─ parse CLI
+  └─ init logging
+  └─ create inbox/outbox
+  └─ open DB + migrations
+  └─ build Pipeline
+  └─ scan inbox
+  └─ reconcile startup
+  └─ start watcher
+  └─ spawn workers
+
+pipeline.rs
+  Queued → Compressing → Compressed
+         → Hashing → Hashed
+         → Moving → Moved
+         → Recording → Done</code></pre>
+        </div>
+      </section>
+
+      <section class="panel" id="entry">
+        <div class="section-head">
+          <div class="eyebrow">main.rs</div>
+          <h3>The entry point is thin orchestration</h3>
+        </div>
+        <p>
+          Your <code>main</code> function is a solid example of idiomatic Rust application structure. It parses command-line arguments, initializes logging, creates directories, opens the database, runs migrations, builds the pipeline, scans the inbox, reconciles interrupted work, optionally starts the file watcher, and then spawns worker threads.
+        </p>
+        <div class="code-block">
+<pre><code>fn main() -> Result&lt;()&gt; {
+    let cli = Cli::parse_args();
+    logging::init(cli.verbose);
+
+    fs::create_dir_all(&amp;cli.inbox)?;
+    fs::create_dir_all(&amp;cli.outbox)?;
+
+    let db = Database::open(&amp;cli.db)?;
+    db.run_migrations("migrations")?;
+
+    let failpoint = cli
+        .failpoint
+        .as_deref()
+        .map(Failpoint::from_str)
+        .transpose()
+        .context("invalid --failpoint value")?;
+
+    let pipeline = Pipeline::new(...);
+    let discovered = pipeline.scan_and_enqueue(&amp;cli.inbox)?;
+    pipeline.reconcile_startup()?;
+}</code></pre>
+        </div>
+        <div class="callout">
+          Teaching point: <code>main.rs</code> coordinates the system. It does not swallow all the logic. That separation makes the code easier to explain and easier to trust.
+        </div>
+      </section>
+
+      <section class="panel" id="cli">
+        <div class="section-head">
+          <div class="eyebrow">cli.rs</div>
+          <h3>CLI parsing shows structs and derive macros in practice</h3>
+        </div>
+        <div class="columns two">
+          <div class="card">
+            <h4>What the code does</h4>
+            <p>
+              The <code>Cli</code> struct uses Clap derive macros to define command-line arguments like inbox path, outbox path, database path, worker count, lock timeout, failpoint selection, and verbosity.
+            </p>
+            <div class="code-block compact">
+<pre><code>#[derive(Debug, Clone, Parser)]
+pub struct Cli {
+    #[arg(long, default_value = "./inbox")]
+    pub inbox: PathBuf,
+    #[arg(long, default_value = "./outbox")]
+    pub outbox: PathBuf,
+    #[arg(long, default_value_t = 2)]
+    pub workers: usize,
+    #[arg(long)]
+    pub failpoint: Option&lt;String&gt;,
+    #[arg(long)]
+    pub verbose: bool,
+}</code></pre>
+            </div>
+          </div>
+          <div class="card">
+            <h4>Rust concept to explain</h4>
+            <p>
+              This is a clean example of a struct modeling configuration. It also shows how derive macros can generate useful behavior without hiding the actual shape of your data.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel" id="result">
+        <div class="section-head">
+          <div class="eyebrow">fallibility</div>
+          <h3><code>Result</code> and the <code>?</code> operator are everywhere for a reason</h3>
+        </div>
+        <div class="columns two">
+          <div class="card">
+            <h4>What your code demonstrates</h4>
+            <p>
+              File I/O, database access, migrations, hashing, compression, watcher setup, and thread execution can all fail. Your code says that directly in the type system and then uses <code>?</code> to propagate errors cleanly.
+            </p>
+          </div>
+          <div class="card">
+            <h4>Why it matters</h4>
+            <p>
+              This project exists to be reliable. Rust makes failure explicit, which is exactly what you want in a crash-resumable pipeline.
+            </p>
+          </div>
+        </div>
+        <div class="code-block">
+<pre><code>fs::create_dir_all(&amp;cli.inbox)?;
+let db = Database::open(&amp;cli.db)?;
+db.run_migrations("migrations")?;
+let discovered = pipeline.scan_and_enqueue(&amp;cli.inbox)?;
+pipeline.reconcile_startup()?;</code></pre>
+        </div>
+      </section>
+
+      <section class="panel" id="structs">
+        <div class="section-head">
+          <div class="eyebrow">data modeling</div>
+          <h3>Structs map directly onto the system</h3>
+        </div>
+        <div class="feature-grid">
+          <article class="card feature">
+            <div class="feature-tag">Configuration</div>
+            <h4><code>PipelineConfig</code></h4>
+            <p>Stores the outbox path, lock timeout, and optional failpoint used to simulate crashes at specific stages.</p>
+          </article>
+          <article class="card feature">
+            <div class="feature-tag">Runtime object</div>
+            <h4><code>Pipeline</code></h4>
+            <p>Wraps the cloned database handle and the runtime configuration used by startup recovery and worker loops.</p>
+          </article>
+          <article class="card feature">
+            <div class="feature-tag">Persistent record</div>
+            <h4><code>FileRecord</code></h4>
+            <p>Represents one tracked file in SQLite: ingest ID, current step, status, hash, output path, timestamps, lock fields, and last error.</p>
+          </article>
+        </div>
+        <div class="callout alt">
+          Teaching point: the codebase models the real system with strongly typed pieces instead of pushing everything into loose strings and ad hoc variables.
+        </div>
+      </section>
+
+      <section class="panel" id="state">
+        <div class="section-head">
+          <div class="eyebrow">state.rs</div>
+          <h3>Enums are the backbone of crash recovery</h3>
+        </div>
+        <p>
+          This is where Rust really starts to pay off in a way beginners can feel. The enums in <code>state.rs</code> define legal states instead of leaving workflow state as random text values scattered through the code.
+        </p>
+        <div class="columns two">
+          <div class="code-block">
+<pre><code>pub enum PipelineStatus {
+    Queued,
+    Processing,
+    Done,
+    Failed,
+}</code></pre>
+          </div>
+          <div class="code-block">
+<pre><code>pub enum PipelineStep {
+    Queued,
+    Compressing,
+    Compressed,
+    Hashing,
+    Hashed,
+    Moving,
+    Moved,
+    Recording,
+    Done,
+}</code></pre>
+          </div>
+        </div>
+        <div class="timeline">
+          <div class="timeline-item"><span>Queued</span><p>The file has been discovered and stored, but no worker is currently processing it.</p></div>
+          <div class="timeline-item"><span>Compressing</span><p>The worker is generating a gzip temporary artifact under the outbox <code>.tmp</code> directory.</p></div>
+          <div class="timeline-item"><span>Hashing</span><p>The code computes or reuses a SHA-256 hash for the original source file.</p></div>
+          <div class="timeline-item"><span>Moving</span><p>The temp file is atomically renamed into its final destination.</p></div>
+          <div class="timeline-item"><span>Recording</span><p>The database is finalized so the row becomes durably complete and unlocked.</p></div>
+        </div>
+        <div class="callout">
+          Because <code>PipelineStep</code> derives ordering traits, the worker can compare steps directly. That makes restart logic clearer and safer than hand-written integer stages.
+        </div>
+      </section>
+
+      <section class="panel" id="flow">
+        <div class="section-head">
+          <div class="eyebrow">pipeline.rs</div>
+          <h3>The worker flow turns Rust types into real pipeline behavior</h3>
+        </div>
+        <div class="code-block">
+<pre><code>if fs_ops::file_exists(&amp;final_path) {
+    self.db.set_output_path(...)?;
+    if job.sha256.is_none() {
+        let hash = fs_ops::sha256_hex(&amp;src_path)?;
+        self.db.set_sha_if_missing(...)?;
+    }
+    self.db.mark_done_and_release(...)?;
+    return Ok(());
+}
+
+if job.current_step &lt;= PipelineStep::Compressed || !temp_path.exists() {
+    self.db.checkpoint_start(&amp;job.ingest_id, PipelineStep::Compressing, worker_id)?;
+    fs_ops::compress_gzip(&amp;src_path, &amp;temp_path)?;
+    self.db.checkpoint_complete(&amp;job.ingest_id, PipelineStep::Compressed, worker_id)?;
+}
+
+let hash = if let Some(existing) = self
+    .db
+    .get_by_ingest_id(&amp;job.ingest_id)?
+    .and_then(|r| r.sha256)
+{
+    existing
+} else {
+    fs_ops::sha256_hex(&amp;src_path)?
+};</code></pre>
+        </div>
+        <div class="columns three">
+          <div class="card">
+            <h4>Option handling</h4>
+            <p><code>if let Some(existing)</code> makes absence explicit and lets the worker reuse stored data without null-style guessing.</p>
+          </div>
+          <div class="card">
+            <h4>Idempotency</h4>
+            <p>If the final output already exists, the pipeline updates metadata and marks the job done rather than duplicating work.</p>
+          </div>
+          <div class="card">
+            <h4>Checkpointing</h4>
+            <p>The worker records each stage before and after it runs so startup recovery can resume from meaningful state.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel" id="ownership">
+        <div class="section-head">
+          <div class="eyebrow">fs_ops.rs</div>
+          <h3>Ownership and <code>Drop</code> show up in a very real way</h3>
+        </div>
+        <p>
+          <code>TempArtifact</code> is one of the strongest Rust teaching examples in the whole codebase. It owns the temporary output file and cleans it up automatically unless it gets committed.
+        </p>
+        <div class="code-block">
+<pre><code>pub struct TempArtifact {
+    path: PathBuf,
+    committed: bool,
+}
+
+impl TempArtifact {
+    pub fn commit(mut self, final_path: &amp;Path) -> Result&lt;(), FsOpsError&gt; {
+        if let Some(parent) = final_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::rename(&amp;self.path, final_path)?;
+        self.committed = true;
+        Ok(())
+    }
+}
+
+impl Drop for TempArtifact {
+    fn drop(&amp;mut self) {
+        if !self.committed {
+            let _ = fs::remove_file(&amp;self.path);
+        }
+    }
+}</code></pre>
+        </div>
+        <div class="callout warn">
+          This is the Rust idea in a single example: the lifetime of the value controls the lifetime of the resource.
+        </div>
+      </section>
+
+      <section class="panel" id="db">
+        <div class="section-head">
+          <div class="eyebrow">db.rs</div>
+          <h3>The database layer makes the pipeline resumable</h3>
+        </div>
+        <div class="columns two">
+          <div class="card">
+            <h4>What the DB functions do</h4>
+            <ul>
+              <li><code>claim_next_job</code> selects a row and assigns it to a worker.</li>
+              <li><code>checkpoint_start</code> records that a stage has begun.</li>
+              <li><code>checkpoint_complete</code> records that a stage has finished.</li>
+              <li><code>set_sha_if_missing</code> preserves an existing hash through <code>COALESCE</code>.</li>
+              <li><code>set_output_path</code> stores the final artifact path.</li>
+              <li><code>mark_failed</code> records errors and releases locks.</li>
+              <li><code>mark_done_and_release</code> finalizes the row and clears worker ownership.</li>
+            </ul>
+          </div>
+          <div class="card">
+            <h4>Why it matters</h4>
+            <p>
+              Rust gives type safety and memory safety, but the recovery story here comes from explicit persisted state transitions. That is what lets the program survive crashes without losing track of reality.
+            </p>
+          </div>
+        </div>
+        <div class="code-block">
+<pre><code>UPDATE files
+SET status = ?1,
+    current_step = ?2,
+    heartbeat_at = ?3,
+    updated_at = ?3
+WHERE ingest_id = ?4
+  AND locked_by = ?5</code></pre>
+        </div>
+        <div class="callout alt">
+          The system treats SQLite as the source of truth for state, lock ownership, progress, and recovery decisions.
+        </div>
+      </section>
+
+      <section class="panel" id="watcher">
+        <div class="section-head">
+          <div class="eyebrow">watcher.rs</div>
+          <h3>The watcher thread is practical Rust concurrency</h3>
+        </div>
+        <div class="code-block">
+<pre><code>let (tx, rx) = mpsc::channel::&lt;notify::Result&lt;Event&gt;&gt;();
+let mut watcher: RecommendedWatcher = notify::recommended_watcher(move |res| {
+    let _ = tx.send(res);
+})?;
+watcher.watch(&amp;inbox, RecursiveMode::NonRecursive)?;
+
+let mut recent: HashMap&lt;PathBuf, Instant&gt; = HashMap::new();
+let debounce = Duration::from_millis(debounce_ms);</code></pre>
+        </div>
+        <div class="columns three">
+          <div class="card">
+            <h4>Channels</h4>
+            <p>The code receives watcher events through an MPSC channel instead of tight polling loops.</p>
+          </div>
+          <div class="card">
+            <h4>Debouncing</h4>
+            <p>A <code>HashMap&lt;PathBuf, Instant&gt;</code> filters out repeated modify events so the same file is not spam-enqueued.</p>
+          </div>
+          <div class="card">
+            <h4>Background work</h4>
+            <p>The watch loop lives in its own thread and hands discovered files back to the database-backed pipeline.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel" id="errors">
+        <div class="section-head">
+          <div class="eyebrow">error.rs</div>
+          <h3>Layered errors keep module boundaries clean</h3>
+        </div>
+        <div class="code-block">
+<pre><code>pub enum PipelineError {
+    Db(#[from] crate::db::DbError),
+    Fs(#[from] crate::fs_ops::FsOpsError),
+    Io(#[from] std::io::Error),
+    Watch(#[from] notify::Error),
+    Failpoint(&amp;'static str),
+}</code></pre>
+        </div>
+        <p>
+          This is a good place to explain <code>thiserror</code> and <code>#[from]</code>. Lower-level module errors can bubble into a higher-level pipeline error cleanly, so the rest of the application stays readable.
+        </p>
+      </section>
+
+      <section class="panel" id="takeaways">
+        <div class="section-head">
+          <div class="eyebrow">closing</div>
+          <h3>Why this code is such a good Rust teaching example</h3>
+        </div>
+        <div class="feature-grid">
+          <article class="card feature">
+            <div class="feature-tag">Explicitness</div>
+            <h4>State is visible</h4>
+            <p>Queued, Processing, Failed, Done, and all intermediate steps are encoded directly in types and persisted state.</p>
+          </article>
+          <article class="card feature">
+            <div class="feature-tag">Safety</div>
+            <h4>Cleanup is automatic</h4>
+            <p><code>TempArtifact</code> ties temp-file cleanup to ownership so you do not rely on fragile cleanup calls.</p>
+          </article>
+          <article class="card feature">
+            <div class="feature-tag">Systems design</div>
+            <h4>Recovery is engineered</h4>
+            <p>The pipeline records transitions, releases stale locks, recognizes completed outputs, and resumes from meaningful checkpoints.</p>
+          </article>
+        </div>
+        <div class="callout">
+          The takeaway for viewers: Rust concepts stop feeling abstract when they are clearly solving correctness problems in a real system.
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script>
+      const sections = [...document.querySelectorAll('.panel[id]')];
+      const links = [...document.querySelectorAll('.toc a')];
+      const progressFill = document.getElementById('progressFill');
+
+      const sectionObserver = new IntersectionObserver(
+        (entries) => {
+          entries.forEach((entry) => {
+            if (entry.isIntersecting) {
+              entry.target.classList.add('visible');
+            }
+          });
+        },
+        { threshold: 0.12 }
+      );
+
+      sections.forEach((section) => sectionObserver.observe(section));
+
+      const navObserver = new IntersectionObserver(
+        (entries) => {
+          const visible = entries
+            .filter((entry) => entry.isIntersecting)
+            .sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0];
+
+          if (!visible) return;
+          const id = visible.target.id;
+          links.forEach((link) => {
+            const match = link.getAttribute('href') === `#${id}`;
+            link.classList.toggle('active', match);
+          });
+        },
+        {
+          rootMargin: '-25% 0px -45% 0px',
+          threshold: [0.15, 0.35, 0.55],
+        }
+      );
+
+      sections.forEach((section) => navObserver.observe(section));
+
+      function updateProgress() {
+        const scrollTop = window.scrollY;
+        const docHeight = document.documentElement.scrollHeight - window.innerHeight;
+        const progress = docHeight <= 0 ? 0 : (scrollTop / docHeight) * 100;
+        progressFill.style.width = `${Math.min(100, Math.max(0, progress))}%`;
+      }
+
+      window.addEventListener('scroll', updateProgress, { passive: true });
+      window.addEventListener('load', updateProgress);
+      window.addEventListener('resize', updateProgress);
+
+
+  </script>
+</body>
+</html>
